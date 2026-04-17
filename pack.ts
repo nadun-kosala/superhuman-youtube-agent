@@ -40,16 +40,18 @@ pack.setUserAuthentication({
 const VideoSchema = coda.makeObjectSchema({
   properties: {
     title: { type: coda.ValueType.String },
+    // Ensure this is the property the AI returns
     player: {
       type: coda.ValueType.String,
-      codaType: coda.ValueHintType.Embed, // This is what creates the player UI
+      codaType: coda.ValueHintType.Embed,
     },
     videoId: { type: coda.ValueType.String },
     url: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
   },
   displayProperty: "title",
-  featuredProperties: ["player"], // This forces the AI to show the player
   idProperty: "videoId",
+  // This is the CRITICAL line for the UI
+  featuredProperties: ["player"],
 });
 
 // --- PHASE 2.2: SYNC TABLES (Place here) ---
@@ -219,6 +221,8 @@ pack.setChatSkill({
     2. DISPLAYING: Show the 'title' and the 'url' so the user can click and watch it.
     3. BUTTONS: Whenever you display a list of videos, use your prompt instructions to generate Follow-Up Suggested Actions (buttons) for the user. Create one button to "Summarize [Title]" and one button to "Like [Title]". 
     4. ACTING: If the user clicks a summarize button or asks for a summary, call 'GetVideoContext' using that video's ID. If they want to save it, call 'LikeVideo'.
+
+    When you show search results, do not just list URLs. Display the results as Video Cards including the 'player' property. This allows the user to watch the video directly in the sidebar.
   `,
   tools: [{ type: coda.ToolType.Pack }], // This gives it access to all formulas (SearchYouTube, LikeVideo, GetVideoContext)
 });
