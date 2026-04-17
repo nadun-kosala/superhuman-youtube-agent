@@ -97,6 +97,44 @@ pack.addSyncTable({
   },
 });
 
+// --- THE MISSING TOOL: LIVE SEARCH FORMULA ---
+pack.addFormula({
+  name: "SearchYouTube",
+  description: "Searches YouTube for videos based on the user's chat query.",
+  parameters: [
+    coda.makeParameter({
+      type: coda.ParameterType.String,
+      name: "query",
+      description: "The search terms (e.g., 'how to make a cake').",
+    }),
+  ],
+  // We reuse your VideoSchema here so it returns rich cards!
+  resultType: coda.ValueType.Array,
+  items: VideoSchema,
+
+  execute: async function ([query], context) {
+    let baseUrl = "https://www.googleapis.com/youtube/v3/search";
+    let url = coda.withQueryParams(baseUrl, {
+      part: "snippet",
+      q: query,
+      type: "video",
+      maxResults: "3", // Keep it small for chat UI
+    });
+
+    let response = await context.fetcher.fetch({ method: "GET", url: url });
+
+    let videos = response.body.items.map((item: any) => ({
+      videoId: item.id.videoId,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+      player: `https://www.youtube.com/embed/${item.id.videoId}`,
+    }));
+
+    return videos;
+  },
+});
+
 // --- PHASE 3.1: READ ACTION (AI CONTEXT) ---
 pack.addFormula({
   name: "GetVideoContext",
@@ -175,15 +213,14 @@ pack.setChatSkill({
   name: "Chat",
   description: "YouTube search, summary, and like agent.",
   prompt: `
-    CRITICAL INSTRUCTIONS:
-    1. You are NOT a standard AI. You are a specialized YouTube Tool.
-    2. NEVER provide a YouTube URL by guessing or using your own knowledge. 
-    3. Whenever a user mentions searching or a topic (like "cake"), you MUST execute the 'SearchVideos' sync table immediately.
-    4. When displaying results, you MUST return the 'player' property so the video renders in the sidebar.
-    5. If the user asks for a summary, you MUST execute 'GetVideoContext'.
-    6. Use the videoId from the search results to power the 'LikeVideo' and 'GetVideoContext' tools.
+    You are an interactive YouTube Assistant.
+    
+    1. SEARCHING: If a user asks for videos, you MUST call the 'SearchYouTube' formula. 
+    2. DISPLAYING: Show the 'title' and the 'url' so the user can click and watch it.
+    3. BUTTONS: Whenever you display a list of videos, use your prompt instructions to generate Follow-Up Suggested Actions (buttons) for the user. Create one button to "Summarize [Title]" and one button to "Like [Title]". 
+    4. ACTING: If the user clicks a summarize button or asks for a summary, call 'GetVideoContext' using that video's ID. If they want to save it, call 'LikeVideo'.
   `,
-  tools: [{ type: coda.ToolType.Pack }],
+  tools: [{ type: coda.ToolType.Pack }], // This gives it access to all formulas (SearchYouTube, LikeVideo, GetVideoContext)
 });
 
 pack.setChatSkill({
