@@ -93,3 +93,69 @@ pack.addSyncTable({
     },
   },
 });
+
+// --- PHASE 3.1: READ ACTION (AI CONTEXT) ---
+pack.addFormula({
+  name: "GetVideoContext",
+  description: "Gets the detailed text of a video so the AI can summarize it.",
+  parameters: [
+    coda.makeParameter({
+      type: coda.ParameterType.String,
+      name: "videoId",
+      description: "The ID of the video.",
+    }),
+  ],
+  resultType: coda.ValueType.String,
+  
+  execute: async function ([videoId], context) {
+    // Call the YouTube API to get the specific video details
+    let url = coda.withQueryParams("https://www.googleapis.com/youtube/v3/videos", {
+      part: "snippet,contentDetails",
+      id: videoId,
+    });
+    
+    let response = await context.fetcher.fetch({ method: "GET", url: url });
+    let video = response.body.items[0];
+    
+    if (!video) {
+      return "Error: Video not found.";
+    }
+
+    // Combine the title and description into a single text block for the AI
+    let textToSummarize = `Title: ${video.snippet.title}\n\nDescription: ${video.snippet.description}`;
+    
+    return textToSummarize;
+  },
+});
+
+// --- PHASE 3.2: WRITE ACTION (TWO-WAY SYNC) ---
+pack.addFormula({
+  name: "LikeVideo",
+  description: "Likes a video on YouTube, saving it to your account.",
+  // isAction: true is CRITICAL here! It tells the system this modifies data.
+  isAction: true, 
+  parameters: [
+    coda.makeParameter({
+      type: coda.ParameterType.String,
+      name: "videoId",
+      description: "The ID of the video you want to like.",
+    }),
+  ],
+  resultType: coda.ValueType.String,
+  
+  execute: async function ([videoId], context) {
+    // The YouTube API endpoint for rating a video
+    let url = coda.withQueryParams("https://www.googleapis.com/youtube/v3/videos/rate", {
+      id: videoId,
+      rating: "like",
+    });
+
+    // Notice we use "POST" instead of "GET" because we are writing data
+    await context.fetcher.fetch({
+      method: "POST",
+      url: url,
+    });
+
+    return "Success! Video has been liked and saved to your YouTube account.";
+  },
+});
