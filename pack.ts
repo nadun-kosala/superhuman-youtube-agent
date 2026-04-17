@@ -40,17 +40,30 @@ pack.setUserAuthentication({
 const VideoSchema = coda.makeObjectSchema({
   properties: {
     title: { type: coda.ValueType.String },
-    // Ensure this is the property the AI returns
+    // thumbnail: shown as a rich image preview on the card
+    thumbnail: {
+      type: coda.ValueType.String,
+      codaType: coda.ValueHintType.ImageReference,
+    },
+    // player: the embeddable URL so the video can play in the sidebar
     player: {
       type: coda.ValueType.String,
       codaType: coda.ValueHintType.Embed,
     },
     videoId: { type: coda.ValueType.String },
     url: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
+    description: { type: coda.ValueType.String },
   },
   displayProperty: "title",
   idProperty: "videoId",
-  // This is the CRITICAL line for the UI
+  // imageProperty: renders the thumbnail on the rich card preview
+  imageProperty: "thumbnail",
+  // linkProperty: makes the card title a clickable link to YouTube
+  linkProperty: "url",
+  // titleProperty / snippetProperty: structure the card layout
+  titleProperty: "title",
+  snippetProperty: "description",
+  // featuredProperties: shows the embedded player when the card is expanded
   featuredProperties: ["player"],
 });
 
@@ -90,6 +103,7 @@ pack.addSyncTable({
         videoId: item.id.videoId,
         title: item.snippet.title,
         description: item.snippet.description,
+        thumbnail: item.snippet.thumbnails?.high?.url ?? item.snippet.thumbnails?.default?.url ?? "",
         url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
         player: `https://www.youtube.com/embed/${item.id.videoId}`,
       }));
@@ -129,6 +143,7 @@ pack.addFormula({
       videoId: item.id.videoId,
       title: item.snippet.title,
       description: item.snippet.description,
+      thumbnail: item.snippet.thumbnails?.high?.url ?? item.snippet.thumbnails?.default?.url ?? "",
       url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
       player: `https://www.youtube.com/embed/${item.id.videoId}`,
     }));
@@ -215,26 +230,23 @@ pack.setChatSkill({
   name: "Chat",
   description: "YouTube search, summary, and like agent.",
   prompt: `
-    You are an interactive YouTube Assistant.
-    
-    1. SEARCHING: If a user asks for videos, you MUST call the 'SearchYouTube' formula. 
-    2. DISPLAYING: Show the 'title' and the 'url' so the user can click and watch it.
-    3. BUTTONS: Whenever you display a list of videos, use your prompt instructions to generate Follow-Up Suggested Actions (buttons) for the user. Create one button to "Summarize [Title]" and one button to "Like [Title]". 
-    4. ACTING: If the user clicks a summarize button or asks for a summary, call 'GetVideoContext' using that video's ID. If they want to save it, call 'LikeVideo'.
+    You are an interactive YouTube Assistant with full access to the SearchYouTube, GetVideoContext, and LikeVideo formulas.
 
-    When you show search results, do not just list URLs. Display the results as Video Cards including the 'player' property. This allows the user to watch the video directly in the sidebar.
+    1. SEARCHING: Whenever the user asks for videos, you MUST call the 'SearchYouTube' formula immediately.
+    2. DISPLAYING: After receiving results, display each video as a rich Video Card. Each card must include:
+       - The 'title' as the card heading.
+       - The 'thumbnail' image (use the imageProperty on the card).
+       - The 'player' embed URL so the user can watch the video directly in the sidebar without leaving.
+       - The 'url' as a clickable link.
+    3. BUTTONS: After displaying cards, always generate Follow-Up Suggested Actions (buttons):
+       - One button per video: "Summarize: [Title]"
+       - One button per video: "Like: [Title]"
+    4. SUMMARIZING: If the user clicks a Summarize button or asks for a summary, call 'GetVideoContext' with that video's ID and provide a 3-point bullet summary.
+    5. LIKING: If the user clicks a Like button or says "like this", call 'LikeVideo' with that video's ID.
+
+    IMPORTANT: Never return a plain list of URLs. Always render full Video Cards with thumbnail and embedded player.
   `,
-  tools: [{ type: coda.ToolType.Pack }], // This gives it access to all formulas (SearchYouTube, LikeVideo, GetVideoContext)
-});
-
-pack.setChatSkill({
-  name: "Chat",
-  description: "YouTube search and interaction agent.",
-  prompt:
-    "You are an expert YouTube assistant. Use the 'SearchVideos' sync table to find videos. Use 'LikeVideo' to save them. Never ask the user for a video ID if you can find it yourself via search.",
-  tools: [
-    { type: coda.ToolType.Pack }, // This pulls in all formulas
-  ],
+  tools: [{ type: coda.ToolType.Pack }],
 });
 
 pack.addSkill({
