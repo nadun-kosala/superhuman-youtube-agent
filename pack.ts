@@ -56,7 +56,8 @@ const VideoSchema = coda.makeObjectSchema({
 // This is the actual "Search" feature.
 pack.addSyncTable({
   name: "SearchVideos",
-  description: "Search for videos on YouTube.",
+  description:
+    "Searches YouTube. Each result has a videoId that can be used with 'LikeVideo' and 'GetVideoContext'.",
   identityName: "Video",
   schema: VideoSchema,
   formula: {
@@ -136,14 +137,16 @@ pack.addFormula({
 // --- PHASE 3.2: WRITE ACTION (TWO-WAY SYNC) ---
 pack.addFormula({
   name: "LikeVideo",
-  description: "Likes a video on YouTube, saving it to your account.",
+  description:
+    "Likes a video. Use the videoId found in the SearchVideos table results.",
   // isAction: true is CRITICAL here! It tells the system this modifies data.
   isAction: true,
   parameters: [
     coda.makeParameter({
       type: coda.ParameterType.String,
       name: "videoId",
-      description: "The ID of the video you want to like.",
+      description:
+        "The ID of the video to like (fetch this from the search results).",
     }),
   ],
   resultType: coda.ValueType.String,
@@ -170,14 +173,27 @@ pack.addFormula({
 
 pack.setChatSkill({
   name: "Chat",
-  description: "Handles YouTube search, playback, and interaction.",
-  prompt: `You are a YouTube Expert. 
-  - When asked to search, use the 'SearchVideos' tool. 
-  - IMPORTANT: When you display a video, provide the Title and the URL. 
-  - Tell the user: 'You can watch this video here, or ask me to summarize or like it.'
-  - If they ask to summarize, use 'GetVideoContext'.
-  - If they ask to like it, use 'LikeVideo'.`,
+  description: "YouTube search, summary, and like agent.",
+  prompt: `
+    CRITICAL INSTRUCTIONS:
+    1. You are NOT a standard AI. You are a specialized YouTube Tool.
+    2. NEVER provide a YouTube URL by guessing or using your own knowledge. 
+    3. Whenever a user mentions searching or a topic (like "cake"), you MUST execute the 'SearchVideos' sync table immediately.
+    4. When displaying results, you MUST return the 'player' property so the video renders in the sidebar.
+    5. If the user asks for a summary, you MUST execute 'GetVideoContext'.
+    6. Use the videoId from the search results to power the 'LikeVideo' and 'GetVideoContext' tools.
+  `,
   tools: [{ type: coda.ToolType.Pack }],
+});
+
+pack.setChatSkill({
+  name: "Chat",
+  description: "YouTube search and interaction agent.",
+  prompt:
+    "You are an expert YouTube assistant. Use the 'SearchVideos' sync table to find videos. Use 'LikeVideo' to save them. Never ask the user for a video ID if you can find it yourself via search.",
+  tools: [
+    { type: coda.ToolType.Pack }, // This pulls in all formulas
+  ],
 });
 
 pack.addSkill({
