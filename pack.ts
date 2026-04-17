@@ -39,15 +39,17 @@ pack.setUserAuthentication({
 // This tells the agent what a "Video" object looks like.
 const VideoSchema = coda.makeObjectSchema({
   properties: {
-    videoId: { type: coda.ValueType.String },
     title: { type: coda.ValueType.String },
-    description: { type: coda.ValueType.String },
+    player: {
+      type: coda.ValueType.String,
+      codaType: coda.ValueHintType.Embed, // This is what creates the player UI
+    },
+    videoId: { type: coda.ValueType.String },
     url: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
-    player: { type: coda.ValueType.String, codaType: coda.ValueHintType.Embed },
   },
   displayProperty: "title",
+  featuredProperties: ["player"], // This forces the AI to show the player
   idProperty: "videoId",
-  featuredProperties: ["player", "description"],
 });
 
 // --- PHASE 2.2: SYNC TABLES (Place here) ---
@@ -106,24 +108,27 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
-  
+
   execute: async function ([videoId], context) {
     // Call the YouTube API to get the specific video details
-    let url = coda.withQueryParams("https://www.googleapis.com/youtube/v3/videos", {
-      part: "snippet,contentDetails",
-      id: videoId,
-    });
-    
+    let url = coda.withQueryParams(
+      "https://www.googleapis.com/youtube/v3/videos",
+      {
+        part: "snippet,contentDetails",
+        id: videoId,
+      },
+    );
+
     let response = await context.fetcher.fetch({ method: "GET", url: url });
     let video = response.body.items[0];
-    
+
     if (!video) {
       return "Error: Video not found.";
     }
 
     // Combine the title and description into a single text block for the AI
     let textToSummarize = `Title: ${video.snippet.title}\n\nDescription: ${video.snippet.description}`;
-    
+
     return textToSummarize;
   },
 });
@@ -133,7 +138,7 @@ pack.addFormula({
   name: "LikeVideo",
   description: "Likes a video on YouTube, saving it to your account.",
   // isAction: true is CRITICAL here! It tells the system this modifies data.
-  isAction: true, 
+  isAction: true,
   parameters: [
     coda.makeParameter({
       type: coda.ParameterType.String,
@@ -142,13 +147,16 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
-  
+
   execute: async function ([videoId], context) {
     // The YouTube API endpoint for rating a video
-    let url = coda.withQueryParams("https://www.googleapis.com/youtube/v3/videos/rate", {
-      id: videoId,
-      rating: "like",
-    });
+    let url = coda.withQueryParams(
+      "https://www.googleapis.com/youtube/v3/videos/rate",
+      {
+        id: videoId,
+        rating: "like",
+      },
+    );
 
     // Notice we use "POST" instead of "GET" because we are writing data
     await context.fetcher.fetch({
@@ -158,4 +166,35 @@ pack.addFormula({
 
     return "Success! Video has been liked and saved to your YouTube account.";
   },
+});
+
+pack.setChatSkill({
+  name: "Chat",
+  description: "Handles YouTube search, playback, and interaction.",
+  prompt: `You are a YouTube Expert. 
+  - When asked to search, use the 'SearchVideos' tool. 
+  - IMPORTANT: When you display a video, provide the Title and the URL. 
+  - Tell the user: 'You can watch this video here, or ask me to summarize or like it.'
+  - If they ask to summarize, use 'GetVideoContext'.
+  - If they ask to like it, use 'LikeVideo'.`,
+  tools: [{ type: coda.ToolType.Pack }],
+});
+
+pack.addSkill({
+  name: "SummarizeVideoSkill",
+  displayName: "Summarize Video",
+  description:
+    "Used when a user wants to summarize a specific video from the list.",
+  prompt:
+    "Use GetVideoContext for the requested video ID. Provide a summary in 3 bullet points.",
+  tools: [{ type: coda.ToolType.Pack }],
+});
+
+pack.addSkill({
+  name: "LikeVideoSkill",
+  displayName: "Like Video",
+  description: "Used when a user says 'like this' or 'save this'.",
+  prompt:
+    "Call the LikeVideo formula using the videoId of the video currently being discussed.",
+  tools: [{ type: coda.ToolType.Pack }],
 });
