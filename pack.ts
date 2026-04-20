@@ -2,60 +2,75 @@ import * as coda from "@codahq/packs-sdk";
 
 export const pack = coda.newPack();
 
-// 1. Declare the Network Domains
-// This tells Superhuman/Coda that your pack is allowed to talk to Google's servers.
 pack.addNetworkDomain("googleapis.com");
 
-
-// 2. Set up OAuth2 User Authentication
-// This triggers the "Sign in with Google" popup for the user.
 pack.setUserAuthentication({
   type: coda.AuthenticationType.OAuth2,
 
-  // Google's standard OAuth endpoints
   authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenUrl: "https://oauth2.googleapis.com/token",
 
   networkDomain: "googleapis.com",
 
-  // The exact scopes you requested in the Google Cloud Console
   scopes: [
-    "https://www.googleapis.com/auth/youtube.readonly",  // Read data and search
-    "https://www.googleapis.com/auth/youtube",           // Like, dislike, playlists
-    "https://www.googleapis.com/auth/youtube.force-ssl", // Subscriptions require this
+    "https://www.googleapis.com/auth/youtube.readonly",
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
   ],
 
-  // Force Google to give us a Refresh Token so the user stays logged in
   additionalParams: {
     access_type: "offline",
     prompt: "consent",
   },
 
-  // Optional but recommended: This labels the connected account in the UI
   getConnectionName: async function (context) {
     return "Sanmark YouTube Connection";
   },
 });
 
-// --- PHASE 2.1: SCHEMAS (Place here) ---
-// This tells the agent what a "Video" object looks like.
+function handleYouTubeError(error: any) {
+  const reason = error?.body?.error?.errors?.[0]?.reason || error?.reason || "";
+
+  if (error.statusCode === 401 && reason === "youtubeSignupRequired") {
+    throw new coda.UserVisibleError(
+      "Action failed: Your Google account isn't linked to a YouTube Channel. Please go to https://www.youtube.com/create_channel to set up your channel, then try again.",
+    );
+  }
+
+  if (error.statusCode === 403 && reason === "quotaExceeded") {
+    throw new coda.UserVisibleError(
+      "The daily YouTube API limit has been reached. Please try again tomorrow or contact support to upgrade.",
+    );
+  }
+
+  if (error.statusCode === 403 && reason === "rateLimitExceeded") {
+    throw new coda.UserVisibleError(
+      "YouTube is receiving too many requests. Please wait a moment and try again.",
+    );
+  }
+
+  if (error.statusCode === 401) {
+    throw new coda.UserVisibleError(
+      "Your YouTube connection has expired. Please log out of the Pack and log back in to refresh your access.",
+    );
+  }
+
+  throw error;
+}
+
 const VideoSchema = coda.makeObjectSchema({
   properties: {
     title: { type: coda.ValueType.String },
-    // thumbnail: ImageReference hotlinks to YouTube's CDN directly in the browser.
-    // The pack server never fetches this URL, so no extra network domain is needed.
     thumbnail: {
       type: coda.ValueType.String,
       codaType: coda.ValueHintType.ImageReference,
     },
-    // player: embed field — force:true bypasses Iframely's oEmbed check.
     player: {
       type: coda.ValueType.String,
       codaType: coda.ValueHintType.Embed,
       force: true,
     } as any,
     videoId: { type: coda.ValueType.String },
-    // channelId: needed for SubscribeToChannel — extracted from search results.
     channelId: { type: coda.ValueType.String },
     url: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
     description: { type: coda.ValueType.String },
@@ -69,8 +84,6 @@ const VideoSchema = coda.makeObjectSchema({
   featuredProperties: ["player"],
 });
 
-// --- PHASE 2.2: SYNC TABLES (Place here) ---
-// This is the actual "Search" feature.
 pack.addSyncTable({
   name: "SearchVideos",
   description:
@@ -80,6 +93,7 @@ pack.addSyncTable({
   formula: {
     name: "SyncSearchVideos",
     description: "Syncs the videos based on a search query.",
+    onError: handleYouTubeError,
     parameters: [
       coda.makeParameter({
         type: coda.ParameterType.String,
@@ -111,7 +125,7 @@ pack.addSyncTable({
           `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
         return {
           videoId: id,
-          channelId: item.snippet.channelId,   // ← needed for SubscribeToChannel
+          channelId: item.snippet.channelId,
           title: item.snippet.title,
           description: item.snippet.description,
           thumbnail: thumb,
@@ -125,7 +139,6 @@ pack.addSyncTable({
   },
 });
 
-// --- THE MISSING TOOL: LIVE SEARCH FORMULA ---
 pack.addFormula({
   name: "SearchYouTube",
   description: "Searches YouTube for videos based on the user's chat query.",
@@ -136,9 +149,9 @@ pack.addFormula({
       description: "The search terms (e.g., 'how to make a cake').",
     }),
   ],
-  // We reuse your VideoSchema here so it returns rich cards!
   resultType: coda.ValueType.Array,
   items: VideoSchema,
+  onError: handleYouTubeError,
 
   execute: async function ([query], context) {
     let baseUrl = "https://www.googleapis.com/youtube/v3/search";
@@ -146,7 +159,7 @@ pack.addFormula({
       part: "snippet",
       q: query,
       type: "video",
-      maxResults: "3", // Keep it small for chat UI
+      maxResults: "3",
     });
 
     let response = await context.fetcher.fetch({ method: "GET", url: url });
@@ -161,7 +174,7 @@ pack.addFormula({
         `https://i.ytimg.com/vi/${id}/hqdefault.jpg`;
       return {
         videoId: id,
-        channelId: item.snippet.channelId,   // ← needed for SubscribeToChannel
+        channelId: item.snippet.channelId,
         title: item.snippet.title,
         description: item.snippet.description,
         thumbnail: thumb,
@@ -174,7 +187,6 @@ pack.addFormula({
   },
 });
 
-// --- PHASE 3.1: READ ACTION (AI CONTEXT) ---
 pack.addFormula({
   name: "GetVideoContext",
   description: "Gets the detailed text of a video so the AI can summarize it.",
@@ -186,9 +198,9 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
 
   execute: async function ([videoId], context) {
-    // Call the YouTube API to get the specific video details
     let url = coda.withQueryParams(
       "https://www.googleapis.com/youtube/v3/videos",
       {
@@ -204,16 +216,12 @@ pack.addFormula({
       return "Error: Video not found.";
     }
 
-    // Combine the title and description into a single text block for the AI
     let textToSummarize = `Title: ${video.snippet.title}\n\nDescription: ${video.snippet.description}`;
 
     return textToSummarize;
   },
 });
 
-// --- PHASE 3.1b: SENTIMENT & TOPIC ANALYSIS ---
-// Extracts structured data points (tone, category, difficulty) from video metadata
-// so the user can understand a video's nature without watching it.
 pack.addFormula({
   name: "AnalyzeVideoTone",
   description:
@@ -226,6 +234,7 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
 
   execute: async function ([videoId], context) {
     let url = coda.withQueryParams(
@@ -244,7 +253,6 @@ pack.addFormula({
     const desc = item.snippet.description.toLowerCase();
     const combined = `${title} ${desc}`;
 
-    // --- Category detection ---
     let category = "General Content";
     if (
       combined.includes("how to") ||
@@ -277,7 +285,6 @@ pack.addFormula({
       category = "Vlog / Lifestyle";
     }
 
-    // --- Technical difficulty estimation ---
     const techTerms = [
       "api",
       "algorithm",
@@ -299,9 +306,6 @@ pack.addFormula({
   },
 });
 
-// --- PHASE 3.2: WRITE ACTIONS (TWO-WAY SYNC) ---
-
-// ① Like a video
 pack.addFormula({
   name: "LikeVideo",
   description: "Likes a video on the user's YouTube account.",
@@ -314,6 +318,7 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
   execute: async function ([videoId], context) {
     const url = coda.withQueryParams(
       "https://www.googleapis.com/youtube/v3/videos/rate",
@@ -324,7 +329,6 @@ pack.addFormula({
   },
 });
 
-// ② Dislike a video
 pack.addFormula({
   name: "DislikeVideo",
   description: "Dislikes a video on the user's YouTube account.",
@@ -337,6 +341,7 @@ pack.addFormula({
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
   execute: async function ([videoId], context) {
     const url = coda.withQueryParams(
       "https://www.googleapis.com/youtube/v3/videos/rate",
@@ -347,7 +352,6 @@ pack.addFormula({
   },
 });
 
-// ③ Subscribe to a channel
 pack.addFormula({
   name: "SubscribeToChannel",
   description:
@@ -357,10 +361,12 @@ pack.addFormula({
     coda.makeParameter({
       type: coda.ParameterType.String,
       name: "channelId",
-      description: "The ID of the channel to subscribe to (from the video card's channelId field).",
+      description:
+        "The ID of the channel to subscribe to (from the video card's channelId field).",
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
   execute: async function ([channelId], context) {
     const url = coda.withQueryParams(
       "https://www.googleapis.com/youtube/v3/subscriptions",
@@ -383,7 +389,6 @@ pack.addFormula({
   },
 });
 
-// ④ Save a video to a playlist (new or existing)
 pack.addFormula({
   name: "SaveToPlaylist",
   description:
@@ -398,22 +403,24 @@ pack.addFormula({
     coda.makeParameter({
       type: coda.ParameterType.String,
       name: "playlistId",
-      description: "The ID of an existing playlist. Leave empty to create a new one.",
+      description:
+        "The ID of an existing playlist. Leave empty to create a new one.",
       optional: true,
     }),
     coda.makeParameter({
       type: coda.ParameterType.String,
       name: "newPlaylistName",
-      description: "Name for a new playlist to create. Required if no playlistId is provided.",
+      description:
+        "Name for a new playlist to create. Required if no playlistId is provided.",
       optional: true,
     }),
   ],
   resultType: coda.ValueType.String,
+  onError: handleYouTubeError,
   execute: async function ([videoId, playlistId, newPlaylistName], context) {
     let targetPlaylistId = playlistId;
     let playlistName = newPlaylistName ?? "My YouTube Playlist";
 
-    // Step 1: create a new playlist if no existing ID was given
     if (!targetPlaylistId) {
       const createUrl = coda.withQueryParams(
         "https://www.googleapis.com/youtube/v3/playlists",
@@ -424,7 +431,10 @@ pack.addFormula({
         url: createUrl,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          snippet: { title: playlistName, description: "Created by Superhuman YouTube Agent" },
+          snippet: {
+            title: playlistName,
+            description: "Created by Superhuman YouTube Agent",
+          },
           status: { privacyStatus: "private" },
         }),
       });
@@ -432,7 +442,6 @@ pack.addFormula({
       playlistName = createRes.body.snippet?.title ?? playlistName;
     }
 
-    // Step 2: insert the video into the playlist
     const insertUrl = coda.withQueryParams(
       "https://www.googleapis.com/youtube/v3/playlistItems",
       { part: "snippet" },
@@ -449,11 +458,10 @@ pack.addFormula({
       }),
     });
 
-    return `✅ Video saved to playlist "${playlistName}" (ID: ${targetPlaylistId}).`;
+    return `Video saved to playlist "${playlistName}" (ID: ${targetPlaylistId}).`;
   },
 });
 
-// ⑤ Generate share links (no API call needed)
 pack.addFormula({
   name: "GenerateShareLinks",
   description:
@@ -496,7 +504,8 @@ pack.addFormula({
 
 pack.setChatSkill({
   name: "Chat",
-  description: "Full YouTube intelligent agent: search, summarize, analyze, like, dislike, subscribe, save to playlist, and share.",
+  description:
+    "Full YouTube intelligent agent: search, summarize, analyze, like, dislike, subscribe, save to playlist, and share.",
   prompt: `
     You are an interactive YouTube Assistant. You have access to these formulas:
     SearchYouTube, GetVideoContext, AnalyzeVideoTone,
@@ -543,15 +552,18 @@ pack.addSkill({
   name: "SummarizeVideoSkill",
   displayName: "Summarize Video",
   description: "Used when a user wants to summarize a specific video.",
-  prompt: "Use GetVideoContext for the requested video ID. Provide a summary in 3 bullet points.",
+  prompt:
+    "Use GetVideoContext for the requested video ID. Provide a summary in 3 bullet points.",
   tools: [{ type: coda.ToolType.Pack }],
 });
 
 pack.addSkill({
   name: "AnalyzeVideoSkill",
   displayName: "Analyze Video Tone",
-  description: "Used when a user asks about the tone, category, or difficulty of a video.",
-  prompt: "Call AnalyzeVideoTone with the videoId. Present Category and Difficulty clearly.",
+  description:
+    "Used when a user asks about the tone, category, or difficulty of a video.",
+  prompt:
+    "Call AnalyzeVideoTone with the videoId. Present Category and Difficulty clearly.",
   tools: [{ type: coda.ToolType.Pack }],
 });
 
@@ -566,7 +578,8 @@ pack.addSkill({
 pack.addSkill({
   name: "DislikeVideoSkill",
   displayName: "Dislike Video",
-  description: "Used when a user says 'dislike' or 'not interested' about a video.",
+  description:
+    "Used when a user says 'dislike' or 'not interested' about a video.",
   prompt: "Call DislikeVideo with the videoId of the video being discussed.",
   tools: [{ type: coda.ToolType.Pack }],
 });
@@ -575,7 +588,8 @@ pack.addSkill({
   name: "SubscribeSkill",
   displayName: "Subscribe to Channel",
   description: "Used when a user says 'subscribe to this channel'.",
-  prompt: "Extract the channelId from the current video card and call SubscribeToChannel with it. Never ask the user for the channelId — it is always present in the search result data.",
+  prompt:
+    "Extract the channelId from the current video card and call SubscribeToChannel with it. Never ask the user for the channelId — it is always present in the search result data.",
   tools: [{ type: coda.ToolType.Pack }],
 });
 
@@ -583,7 +597,8 @@ pack.addSkill({
   name: "SaveToPlaylistSkill",
   displayName: "Save to Playlist",
   description: "Used when a user wants to save a video to a YouTube playlist.",
-  prompt: "Ask the user if they want an existing playlist (playlistId) or a new one (name). Then call SaveToPlaylist with the videoId and either playlistId or newPlaylistName.",
+  prompt:
+    "Ask the user if they want an existing playlist (playlistId) or a new one (name). Then call SaveToPlaylist with the videoId and either playlistId or newPlaylistName.",
   tools: [{ type: coda.ToolType.Pack }],
 });
 
@@ -591,6 +606,7 @@ pack.addSkill({
   name: "ShareVideoSkill",
   displayName: "Share Video",
   description: "Used when a user asks to share a video or copy a link.",
-  prompt: "Call GenerateShareLinks with the videoId and title of the video. Display the returned Markdown exactly as-is without paraphrasing.",
+  prompt:
+    "Call GenerateShareLinks with the videoId and title of the video. Display the returned Markdown exactly as-is without paraphrasing.",
   tools: [{ type: coda.ToolType.Pack }],
 });
