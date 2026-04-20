@@ -325,7 +325,7 @@ pack.addFormula({
       { id: videoId, rating: "like" },
     );
     await context.fetcher.fetch({ method: "POST", url });
-    return "✅ Video liked and saved to your YouTube account!";
+    return "Video liked and saved to your YouTube account!";
   },
 });
 
@@ -385,7 +385,7 @@ pack.addFormula({
         },
       }),
     });
-    return `✅ Successfully subscribed to channel ${channelId}!`;
+    return `Successfully subscribed to channel ${channelId}!`;
   },
 });
 
