@@ -229,6 +229,17 @@ const VideoSchema = coda.makeObjectSchema({
   featuredProperties: ["player"],
 });
 
+const SearchYouTubeResultSchema = coda.makeObjectSchema({
+  properties: {
+    items: {
+      type: coda.ValueType.Array,
+      items: VideoSchema,
+    },
+    nextPageToken: { type: coda.ValueType.String },
+  },
+  displayProperty: "nextPageToken",
+});
+
 pack.addSyncTable({
   name: "SearchVideos",
   description:
@@ -293,23 +304,33 @@ pack.addFormula({
       name: "query",
       description: "The search terms (e.g., 'how to make a cake').",
     }),
+    coda.makeParameter({
+      type: coda.ParameterType.String,
+      name: "pageToken",
+      description: "Used to load the next page of results.",
+      optional: true,
+    }),
   ],
-  resultType: coda.ValueType.Array,
-  items: VideoSchema,
+  resultType: coda.ValueType.Object,
+  schema: SearchYouTubeResultSchema,
   onError: handleYouTubeError,
 
-  execute: async function ([query], context) {
+  execute: async function ([query, pageToken], context) {
     let baseUrl = "https://www.googleapis.com/youtube/v3/search";
-    let url = coda.withQueryParams(baseUrl, {
+    const queryParams: {[key: string]: string} = {
       part: "snippet",
       q: query,
       type: "video",
-      maxResults: "3",
-    });
+      maxResults: "10",
+    };
+    if (pageToken) {
+      queryParams.pageToken = pageToken;
+    }
+    let url = coda.withQueryParams(baseUrl, queryParams);
 
     let response = await context.fetcher.fetch({ method: "GET", url: url });
 
-    let videos = response.body.items.map((item: any) => {
+    let videos = (response.body.items ?? []).map((item: any) => {
       const id = item.id.videoId;
       const thumb =
         item.snippet.thumbnails?.maxres?.url ??
@@ -328,7 +349,15 @@ pack.addFormula({
       };
     });
 
-    return videos;
+    for (let i = videos.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [videos[i], videos[j]] = [videos[j], videos[i]];
+    }
+
+    return {
+      items: videos.slice(0, 5),
+      nextPageToken: response.body.nextPageToken ?? "",
+    };
   },
 });
 
@@ -753,11 +782,12 @@ pack.setChatSkill({
        - ALWAYS display the thumbnail image cleanly at the top of the result using markdown (e.g., ![Video Title](thumbnailUrl)). Do NOT prefix it with words like "Thumbnail:".
        - ALWAYS include a direct, clickable link to watch the video on YouTube below the thumbnail.
        - The embed player renders automatically — never print the player URL in text.
-    5. BUTTONS: After cards, add Follow-Up Suggested Action buttons for each video:
+    5. PAGINATION: If the user asks for "more videos" or isn't satisfied with the results, call 'SearchYouTube' again using the 'nextPageToken' from your previous search to load fresh results.
+    6. BUTTONS: After cards, add Follow-Up Suggested Action buttons for each video:
        "Summarize" | "Analyze Tone" | "Like" | "Dislike" | "Subscribe" | "Save to Playlist" | "Share"
 
     ── DEEP ANALYSIS & SUMMARIZATION ──
-    6. When asked to summarize or explain a video:
+    7. When asked to summarize or explain a video:
        - STEP 1: Call 'GetVideoContext'.
        - STEP 2: Check 'hasChapters'. If TRUE, use 'extractedChapters' to build a summary with clickable [MM:SS] links.
        - STEP 3: If 'hasChapters' is FALSE (or the description is empty), call 'GetVideoTranscript' immediately.
@@ -765,24 +795,24 @@ pack.setChatSkill({
        - If there are no timestamps in the description, simply provide a 3-bullet summary and a link to [00:00].
        - **CRITICAL**: The user does not care about API errors. Never mention "PermissionDenied", "Transcript Unavailable", or "YouTube Restrictions". If you can't get a transcript, just summarize the description quietly and say "I can't get the transcript for this video."
 
-       7. CLICKABLE LINKS: Every timestamp MUST be a markdown link: [MM:SS](https://www.youtube.com/watch?v=VIDEO_ID&t=SECONDS).
+       8. CLICKABLE LINKS: Every timestamp MUST be a markdown link: [MM:SS](https://www.youtube.com/watch?v=VIDEO_ID&t=SECONDS).
        - Example: 01:30 becomes [01:30](https://www.youtube.com/watch?v=abc123&t=90)
  
        ── WRITE ACTIONS ──
-    8. LIKING: If the user says "like", call 'LikeVideo' with the video's videoId.
-    9. DISLIKING: If the user says "dislike" or "not interested", call 'DislikeVideo'
+    9. LIKING: If the user says "like", call 'LikeVideo' with the video's videoId.
+   10. DISLIKING: If the user says "dislike" or "not interested", call 'DislikeVideo'
        with the video's videoId.
-   10. SUBSCRIBING: If the user says "subscribe", extract the 'channelId' field from
+   11. SUBSCRIBING: If the user says "subscribe", extract the 'channelId' field from
        the video card and call 'SubscribeToChannel' with it. The channelId is always
        present in the card data — never ask the user to provide it manually.
-   11. SAVING TO PLAYLIST:
+   12. SAVING TO PLAYLIST:
        - If the user says "save to playlist" and names a specific existing playlist,
          ask them for the playlistId or use one they previously provided.
        - If the user wants a new playlist, ask for the playlist name, then call
          'SaveToPlaylist' with the videoId and newPlaylistName.
        - If no name or ID is specified, ask: "Should I save to an existing playlist
          (provide the ID) or create a new one? What should it be called?"
-   12. SHARING: If the user says "share" or "copy link", call 'GenerateShareLinks'
+   13. SHARING: If the user says "share" or "copy link", call 'GenerateShareLinks'
        with the video's videoId and title. Display the returned Markdown directly —
        do not paraphrase or reformat it.
 
