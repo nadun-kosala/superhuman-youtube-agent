@@ -58,6 +58,151 @@ function handleYouTubeError(error: any) {
   throw error;
 }
 
+const TimestampRegex = /(?:^|\s)(\d{1,2}:\d{2}(?::\d{2})?)(?=\s|[-–—]|$)/gm;
+const ChapterTimestampRegex = /\b\d{1,2}:\d{2}(?::\d{2})?\b/;
+
+function timestampToSeconds(timestamp: string): number {
+  const parts = timestamp.split(":").map(part => Number(part));
+  if (parts.length === 2) {
+    return parts[0] * 60 + parts[1];
+  }
+  if (parts.length === 3) {
+    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  return 0;
+}
+
+function buildTimestampLinks(text: string, videoId: string): string[] {
+  const links: string[] = [];
+  const seen = new Set<number>();
+  let match: RegExpExecArray | null;
+  TimestampRegex.lastIndex = 0;
+  while ((match = TimestampRegex.exec(text)) !== null) {
+    const stamp = match[1];
+    const seconds = timestampToSeconds(stamp);
+    if (seen.has(seconds)) {
+      continue;
+    }
+    seen.add(seconds);
+    links.push(`https://www.youtube.com/watch?v=${videoId}&t=${seconds}s`);
+  }
+  TimestampRegex.lastIndex = 0;
+  return links;
+}
+
+function parseCaptionPayload(rawBody: any): string {
+  if (!rawBody) {
+    return "";
+  }
+  const asString =
+    typeof rawBody === "string"
+      ? rawBody
+      : typeof rawBody?.toString === "function"
+        ? rawBody.toString("utf-8")
+        : JSON.stringify(rawBody);
+
+  if (asString.trim().startsWith("<")) {
+    return asString
+      .replace(/<text[^>]*>/g, "")
+      .replace(/<\/text>/g, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/\r/g, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  return asString
+    .replace(/\d+\s*\n/g, "")
+    .replace(/\d{2}:\d{2}:\d{2},\d{3}\s-->\s\d{2}:\d{2}:\d{2},\d{3}/g, "")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractChapterLines(description: string): string {
+  return description
+    .split("\n")
+    .filter(line => ChapterTimestampRegex.test(line))
+    .join("\n");
+}
+
+async function getVideoSnippet(videoId: string, context: coda.ExecutionContext) {
+  const url = coda.withQueryParams("https://www.googleapis.com/youtube/v3/videos", {
+    part: "snippet,contentDetails",
+    id: videoId,
+  });
+  const response = await context.fetcher.fetch({ method: "GET", url });
+  return response.body.items?.[0];
+}
+
+async function fetchTranscriptFromCaptions(videoId: string, context: coda.ExecutionContext) {
+  try {
+    const listUrl = coda.withQueryParams("https://www.googleapis.com/youtube/v3/captions", {
+      part: "snippet",
+      videoId: videoId,
+      maxResults: "50",
+    });
+    const listResponse = await context.fetcher.fetch({ method: "GET", url: listUrl });
+    const tracks = listResponse.body.items ?? [];
+    if (!tracks.length) {
+      return "";
+    }
+  
+    const englishTrack =
+      tracks.find((track: any) => track.snippet?.language?.toLowerCase().startsWith("en")) ??
+      tracks[0];
+    const captionId = englishTrack?.id;
+    if (!captionId) {
+      return "";
+    }
+  
+    const downloadUrl = coda.withQueryParams(
+      `https://www.googleapis.com/youtube/v3/captions/${captionId}`,
+      {
+        tfmt: "srt",
+        alt: "media",
+      },
+    );
+    const downloadResponse = await context.fetcher.fetch({
+      method: "GET",
+      url: downloadUrl,
+    });
+    return parseCaptionPayload(downloadResponse.body);
+  } catch (error) {
+    return "";
+  }
+  
+}
+
+const VideoContextSchema = coda.makeObjectSchema({
+  properties: {
+    description: { type: coda.ValueType.String },
+    extractedChapters: { type: coda.ValueType.String },
+    hasChapters: { type: coda.ValueType.Boolean },
+    hasTimestamps: { type: coda.ValueType.Boolean },
+    transcriptChunk: { type: coda.ValueType.String },
+    watchUrl: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
+    timestampLinks: {
+      type: coda.ValueType.Array,
+      items: { type: coda.ValueType.String, codaType: coda.ValueHintType.Url },
+    },
+  },
+  displayProperty: "description",
+});
+
+const TranscriptResultSchema = coda.makeObjectSchema({
+  properties: {
+    transcriptText: { type: coda.ValueType.String },
+    error: { type: coda.ValueType.String },
+  },
+  displayProperty: "transcriptText",
+});
+
 const VideoSchema = coda.makeObjectSchema({
   properties: {
     title: { type: coda.ValueType.String },
@@ -189,7 +334,8 @@ pack.addFormula({
 
 pack.addFormula({
   name: "GetVideoContext",
-  description: "Gets the detailed text of a video so the AI can summarize it.",
+  description:
+    "Gets description plus transcript context for deep summaries and timestamp navigation.",
   parameters: [
     coda.makeParameter({
       type: coda.ParameterType.String,
@@ -197,28 +343,114 @@ pack.addFormula({
       description: "The ID of the video.",
     }),
   ],
-  resultType: coda.ValueType.String,
+  resultType: coda.ValueType.Object,
+  schema: VideoContextSchema,
   onError: handleYouTubeError,
 
   execute: async function ([videoId], context) {
-    let url = coda.withQueryParams(
-      "https://www.googleapis.com/youtube/v3/videos",
-      {
-        part: "snippet,contentDetails",
-        id: videoId,
-      },
-    );
-
-    let response = await context.fetcher.fetch({ method: "GET", url: url });
-    let video = response.body.items[0];
+    const video = await getVideoSnippet(videoId, context);
 
     if (!video) {
-      return "Error: Video not found.";
+      return {
+        description: "Error: Video not found.",
+        extractedChapters: "",
+        hasChapters: false,
+        hasTimestamps: false,
+        transcriptChunk: "",
+        watchUrl: `https://www.youtube.com/watch?v=${videoId}`,
+        timestampLinks: [],
+      };
     }
 
-    let textToSummarize = `Title: ${video.snippet.title}\n\nDescription: ${video.snippet.description}`;
+    const description = video.snippet.description ?? "";
+    const extractedChapters = extractChapterLines(description);
+    const hasChapters = extractedChapters.length > 0;
+    const hasTimestamps = hasChapters || TimestampRegex.test(description);
+    TimestampRegex.lastIndex = 0;
+    let transcript = "";
 
-    return textToSummarize;
+    try {
+      transcript = await fetchTranscriptFromCaptions(videoId, context);
+    } catch (error: any) {
+      if (error?.statusCode !== 403) {
+        handleYouTubeError(error);
+      }
+      transcript = extractChapterLines(description);
+    }
+
+    if (!transcript && description.trim().length < 100) {
+      const tags = video.snippet.tags?.join(", ") ?? "No tags available";
+      transcript = `High-level context from metadata:\nTitle: ${video.snippet.title}\nTags: ${tags}`;
+    }
+
+    return {
+      description: description,
+      extractedChapters: extractedChapters,
+      hasChapters: hasChapters,
+      hasTimestamps: hasTimestamps,
+      transcriptChunk: transcript.slice(0, 5000),
+      watchUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      timestampLinks: buildTimestampLinks(description, videoId),
+    };
+  },
+});
+
+pack.addFormula({
+  name: "GetVideoTranscript",
+  description:
+    "Fetches transcript text for a video via captions, with chapter fallback for restricted caption APIs.",
+  parameters: [
+    coda.makeParameter({
+      type: coda.ParameterType.String,
+      name: "videoId",
+      description: "The ID of the video.",
+    }),
+  ],
+  resultType: coda.ValueType.Object,
+  schema: TranscriptResultSchema,
+  onError: handleYouTubeError,
+  execute: async function ([videoId], context) {
+    const video = await getVideoSnippet(videoId, context);
+    if (!video) {
+      return {
+        transcriptText: "Unavailable",
+        error: "VideoNotFound",
+      };
+    }
+
+    try {
+      const transcript = await fetchTranscriptFromCaptions(videoId, context);
+      if (transcript) {
+        return {
+          transcriptText: transcript,
+          error: "",
+        };
+      }
+    } catch (error: any) {
+      if (error?.statusCode === 403 || error?.statusCode === 404) {
+        return {
+          transcriptText: "Unavailable",
+          error: "PermissionDenied",
+        };
+      }
+      if (error?.statusCode !== 403 && error?.statusCode !== 404) {
+        handleYouTubeError(error);
+      }
+    }
+
+    const chapterLines = extractChapterLines(video.snippet.description ?? "");
+    if (chapterLines) {
+      return {
+        transcriptText: chapterLines,
+        error: "",
+      };
+    }
+
+    const tags = video.snippet.tags?.join(", ") ?? "No tags available";
+    return {
+      transcriptText: `High-level context from metadata:\nTitle: ${video.snippet.title}\nTags: ${tags}`,
+      error: "Unavailable",
+    };
   },
 });
 
@@ -508,7 +740,7 @@ pack.setChatSkill({
     "Full YouTube intelligent agent: search, summarize, analyze, like, dislike, subscribe, save to playlist, and share.",
   prompt: `
     You are an interactive YouTube Assistant. You have access to these formulas:
-    SearchYouTube, GetVideoContext, AnalyzeVideoTone,
+    SearchYouTube, GetVideoContext, GetVideoTranscript, AnalyzeVideoTone,
     LikeVideo, DislikeVideo, SubscribeToChannel, SaveToPlaylist, GenerateShareLinks.
 
     ── AUTHENTICATION ──
@@ -524,11 +756,19 @@ pack.setChatSkill({
     5. BUTTONS: After cards, add Follow-Up Suggested Action buttons for each video:
        "Summarize" | "Analyze Tone" | "Like" | "Dislike" | "Subscribe" | "Save to Playlist" | "Share"
 
-    ── READ ACTIONS ──
-    6. SUMMARIZING: Call 'GetVideoContext' → present a 3-bullet summary.
-    7. ANALYZING: Call 'AnalyzeVideoTone' → show Category and Difficulty.
+    ── DEEP ANALYSIS & SUMMARIZATION ──
+    6. When asked to summarize or explain a video:
+       - STEP 1: Call 'GetVideoContext'.
+       - STEP 2: Check 'hasChapters'. If TRUE, use 'extractedChapters' to build a summary with clickable [MM:SS] links.
+       - STEP 3: If 'hasChapters' is FALSE (or the description is empty), call 'GetVideoTranscript' immediately.
+       - STEP 4: If 'GetVideoTranscript' provides text, pick 3-5 key time intervals and create your own timestamps (e.g., [00:00], [03:00], [06:00]).
+       - If there are no timestamps in the description, simply provide a 3-bullet summary and a link to [00:00].
+       - **CRITICAL**: The user does not care about API errors. Never mention "PermissionDenied", "Transcript Unavailable", or "YouTube Restrictions". If you can't get a transcript, just summarize the description quietly and say "I can't get the transcript for this video."
 
-    ── WRITE ACTIONS ──
+       7. CLICKABLE LINKS: Every timestamp MUST be a markdown link: [MM:SS](https://www.youtube.com/watch?v=VIDEO_ID&t=SECONDS).
+       - Example: 01:30 becomes [01:30](https://www.youtube.com/watch?v=abc123&t=90)
+ 
+       ── WRITE ACTIONS ──
     8. LIKING: If the user says "like", call 'LikeVideo' with the video's videoId.
     9. DISLIKING: If the user says "dislike" or "not interested", call 'DislikeVideo'
        with the video's videoId.
@@ -546,7 +786,11 @@ pack.setChatSkill({
        with the video's videoId and title. Display the returned Markdown directly —
        do not paraphrase or reformat it.
 
-    ── RULES ──
+    ── STRICTURES (CRITICAL) ──
+    NEVER say "I don't have access to timestamps" or "I can't see the transcript."
+    NEVER apologize for missing data. If all tools fail, summarize based on the 'Title' and 'Tags' and provide a link to the start of the video [00:00].
+    DO NOT invent/hallucinate timestamps if you don't have the transcript; only use [00:00] as a fallback.
+    ALWAYS show the Video Thumbnail at the top of every summary.
     NEVER print raw /embed/ URLs, nocookie URLs, or videoId values as plain text.
     NEVER show a plain list of URLs. Always use rich Video Cards with the Thumbnail first, followed by the direct YouTube link.
     ALWAYS use the videoId and channelId values from the card — never invent them.
@@ -559,7 +803,7 @@ pack.addSkill({
   displayName: "Summarize Video",
   description: "Used when a user wants to summarize a specific video.",
   prompt:
-    "Use GetVideoContext for the requested video ID. Provide a summary in 3 bullet points.",
+    "Call GetVideoContext first. If hasChapters is true, use extractedChapters with clickable [MM:SS](https://www.youtube.com/watch?v=VIDEO_ID&t=SECONDS) links. If not, call GetVideoTranscript. If transcriptText is unavailable, summarize from title and tags with [00:00] only.",
   tools: [{ type: coda.ToolType.Pack }],
 });
 
